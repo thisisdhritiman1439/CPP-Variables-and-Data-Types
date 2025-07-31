@@ -1,177 +1,145 @@
 import streamlit as st
+import pandas as pd
 import os
-import json
-import hashlib
-import uuid
-import base64
+import time
+import random
 import pyqrcode
 import cv2
-from PIL import Image
-import numpy as np
+import base64
+from datetime import datetime
 
-# ------------------- Paths -----------------------
-USER_DATA_FILE = "users.json"
-UPLOAD_FOLDER = "uploads"
+# CSV file for user database
+USER_DB = "users.csv"
+LOGIN_LOG = "login_log.csv"
 
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+# Ensure CSV files exist
+if not os.path.exists(USER_DB):
+    pd.DataFrame(columns=["email", "password", "image", "secret_code"]).to_csv(USER_DB, index=False)
+if not os.path.exists(LOGIN_LOG):
+    pd.DataFrame(columns=["email", "login_time"]).to_csv(LOGIN_LOG, index=False)
 
-# ------------------- Helpers -----------------------
+# ---------- Helper Functions ----------
 
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
+def save_user(email, password, uploaded_file, secret_code):
+    file_path = f"images/{email.replace('@', '_at_')}.jpg"
+    with open(file_path, "wb") as f:
+        f.write(uploaded_file.read())
+    df = pd.read_csv(USER_DB)
+    df = df.append({"email": email, "password": password, "image": file_path, "secret_code": secret_code}, ignore_index=True)
+    df.to_csv(USER_DB, index=False)
 
-def load_users():
-    if os.path.exists(USER_DATA_FILE):
-        with open(USER_DATA_FILE, 'r') as f:
-            return json.load(f)
-    return {}
+def validate_credentials(email, password):
+    df = pd.read_csv(USER_DB)
+    user = df[(df.email == email) & (df.password == password)]
+    return not user.empty
 
-def save_users(users):
-    with open(USER_DATA_FILE, 'w') as f:
-        json.dump(users, f)
+def get_user_info(email):
+    df = pd.read_csv(USER_DB)
+    user = df[df.email == email].iloc[0]
+    return user
 
-def verify_image(img1_path, img2):
-    try:
-        img1 = Image.open(img1_path).resize((100, 100)).convert('L')
-        img2 = img2.resize((100, 100)).convert('L')
-        return np.allclose(np.array(img1), np.array(img2), atol=20)
-    except:
-        return False
+def generate_qr_code(code):
+    qr = pyqrcode.create(code)
+    qr.png("qr.png", scale=6)
+    return "qr.png"
 
-# ------------------- UI Styling -----------------------
+def facial_match(stored_image_path):
+    st.info("Turn on your webcam and align your face")
+    cap = cv2.VideoCapture(0)
+    stframe = st.empty()
+    matched = False
 
-st.set_page_config(page_title="🔐Welcome to 3-Level Auth System", layout="centered")
+    for _ in range(50):
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-def header(text, size=24):
-    st.markdown(f"<h3 style='font-size: {size}px;'>{text}</h3>", unsafe_allow_html=True)
+        stframe.image(frame, channels="BGR")
 
-# ------------------- Pages -----------------------
+        cv2.imwrite("current.jpg", frame)
+        match_score = compare_images("current.jpg", stored_image_path)
 
-def register():
-    header("📝 Register", 28)
-    with st.form("RegisterForm"):
+        if match_score >= 0.6:
+            matched = True
+            break
+    cap.release()
+    return matched
+
+def compare_images(img1_path, img2_path):
+    img1 = cv2.imread(img1_path)
+    img2 = cv2.imread(img2_path)
+
+    if img1 is None or img2 is None:
+        return 0
+
+    img1 = cv2.resize(img1, (100, 100))
+    img2 = cv2.resize(img2, (100, 100))
+
+    diff = cv2.absdiff(img1, img2)
+    score = 1 - (cv2.countNonZero(cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)) / (100 * 100))
+    return score
+
+def record_login(email):
+    df = pd.read_csv(LOGIN_LOG)
+    df = df.append({"email": email, "login_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, ignore_index=True)
+    df.to_csv(LOGIN_LOG, index=False)
+
+# ---------- App UI ----------
+
+st.set_page_config(page_title="Three-Factor Authentication", layout="centered")
+st.title("🔐 Three-Factor Authentication System")
+st.markdown("<h3 style='font-size:22px;'>Secure your login with Email + QR + Face Recognition</h3>", unsafe_allow_html=True)
+
+menu = ["Login", "Register"]
+choice = st.sidebar.radio("Navigation", menu)
+
+if choice == "Register":
+    st.subheader("📥 Register")
+    with st.form("register_form"):
         email = st.text_input("Email")
         password = st.text_input("Password", type="password")
-        uploaded_file = st.file_uploader("Upload File to Protect", type=None)
-        image = st.file_uploader("Upload Face Image (JPG/PNG)", type=["jpg", "jpeg", "png"])
-        submit = st.form_submit_button("Register")
+        uploaded_file = st.file_uploader("Upload your face image", type=["jpg", "jpeg", "png"])
+        secret_code = str(random.randint(100000, 999999))
+        submitted = st.form_submit_button("Register")
 
-    if submit:
-        if not all([email, password, uploaded_file, image]):
-            st.error("All fields are required.")
-            return
-        if len(password) < 8:
-            st.warning("Password must be at least 8 characters.")
-            return
+        if submitted:
+            if email and password and uploaded_file:
+                save_user(email, password, uploaded_file, secret_code)
+                st.success("Registered successfully!")
+                st.image(generate_qr_code(secret_code), caption="Scan this QR for 6-digit code")
+            else:
+                st.error("Please fill all fields and upload a face image.")
 
-        users = load_users()
-        if email in users:
-            st.error("User already exists.")
-            return
-
-        uid = str(uuid.uuid4())
-        user_folder = os.path.join(UPLOAD_FOLDER, uid)
-        os.makedirs(user_folder, exist_ok=True)
-
-        with open(os.path.join(user_folder, uploaded_file.name), "wb") as f:
-            f.write(uploaded_file.read())
-
-        image_path = os.path.join(user_folder, "face.png")
-        with open(image_path, "wb") as f:
-            f.write(image.read())
-
-        users[email] = {
-            "password": hash_password(password),
-            "file": uploaded_file.name,
-            "uid": uid
-        }
-        save_users(users)
-
-        st.success("Registered successfully. Please login!")
-
-def login():
-    header("🔐 Login", 28)
-    with st.form("LoginForm"):
+elif choice == "Login":
+    st.subheader("🔐 Login")
+    with st.form("login_form"):
         email = st.text_input("Email")
         password = st.text_input("Password", type="password")
-        submit = st.form_submit_button("Proceed to Factor 2")
+        submitted = st.form_submit_button("Login")
 
-    if submit:
-        users = load_users()
-        if email not in users or users[email]["password"] != hash_password(password):
-            st.error("Invalid email or password.")
-            return
+    if submitted:
+        if validate_credentials(email, password):
+            st.success("✅ Step 1 Passed: Email and Password matched")
+            user = get_user_info(email)
+            qr_code_path = generate_qr_code(user['secret_code'])
+            st.image(qr_code_path, caption="Scan QR and enter the 6-digit code")
+            code = st.text_input("Enter the code visible from QR")
 
-        st.session_state["email"] = email
-        show_qr_code(email)
+            if code == user['secret_code']:
+                st.success("✅ Step 2 Passed: QR code matched")
 
-def show_qr_code(email):
-    st.info("Scan this QR code to get your 6-digit access code.")
-
-    secret_code = str(uuid.uuid4().int)[:6]
-    qr = pyqrcode.create(secret_code)
-    qr_path = "qr.png"
-    qr.png(qr_path, scale=5)
-
-    with open("qr_secret.json", "w") as f:
-        json.dump({"email": email, "code": secret_code}, f)
-
-    st.image(qr_path)
-
-    user_input = st.text_input("Enter 6-digit code from QR scan")
-
-    if user_input:
-        with open("qr_secret.json", "r") as f:
-            qr_data = json.load(f)
-
-        if qr_data["email"] == email and qr_data["code"] == user_input.strip():
-            st.success("QR Verification Passed ✅")
-            face_verification(email)
+                if facial_match(user['image']):
+                    st.success("✅ Step 3 Passed: Facial Recognition Successful")
+                    record_login(email)
+                    st.balloons()
+                    st.info(f"Access granted to secure files for: {email}")
+                    st.write("Here are your protected files:")
+                    uploaded_files = st.file_uploader("Upload or View Your Files", accept_multiple_files=True)
+                    for file in uploaded_files:
+                        st.write(f"- {file.name}")
+                else:
+                    st.error("❌ Step 3 Failed: Face doesn't match")
+            else:
+                st.error("❌ Step 2 Failed: Incorrect code")
         else:
-            st.error("Invalid QR Code. Restarting login...")
-            st.session_state.clear()
-
-def face_verification(email):
-    st.info("Upload your registered face image for final verification.")
-
-    uploaded_img = st.file_uploader("Upload Face Image", type=["jpg", "jpeg", "png"])
-    if uploaded_img:
-        users = load_users()
-        uid = users[email]["uid"]
-        original_face = os.path.join(UPLOAD_FOLDER, uid, "face.png")
-        img = Image.open(uploaded_img)
-
-        if verify_image(original_face, img):
-            st.success("Authentication successful ✅")
-
-            file_name = users[email]["file"]
-            file_path = os.path.join(UPLOAD_FOLDER, uid, file_name)
-
-            with open(file_path, "rb") as f:
-                btn = st.download_button("⬇️ Download Your Protected File", f, file_name)
-
-            if btn:
-                st.balloons()
-        else:
-            st.error("Face does not match! Restarting login...")
-            st.session_state.clear()
-
-# ------------------- Main -----------------------
-
-def main():
-    st.sidebar.markdown(
-        "<h2 style='font-size:24px;'>🔐 3-Level Auth</h2>",
-        unsafe_allow_html=True
-    )
-    choice = st.sidebar.radio("Navigation", ["Register", "Login", "Logout"])
-
-    if choice == "Register":
-        register()
-    elif choice == "Login":
-        login()
-    elif choice == "Logout":
-        st.session_state.clear()
-        st.success("Logged out.")
-
-if __name__ == "__main__":
-    main()
+            st.error("❌ Step 1 Failed: Incorrect email or password")
