@@ -1,4 +1,4 @@
-import streamlit as st
+comimport streamlit as st
 import os
 import json
 import hashlib
@@ -40,7 +40,7 @@ def verify_image(img1_path, img2):
 
 # ------------------- UI Styling -----------------------
 
-st.set_page_config(page_title="🔐 3-Level Auth System", layout="centered")
+st.set_page_config(page_title="🔐Welcome to 3-Level Auth System", layout="centered")
 
 def header(text, size=24):
     st.markdown(f"<h3 style='font-size: {size}px;'>{text}</h3>", unsafe_allow_html=True)
